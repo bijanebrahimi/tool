@@ -2,90 +2,48 @@
 # @virt @virsh @ssh
 # echo -e 'ld\nq'|ev
 
-
+VERSION=''
 EVD='/ev'
 URI='qemu:///session'
 VIRTINST='/usr/bin/virt-install'
 VIRSH='/usr/bin/virsh --quiet'
 VXML='/usr/bin/virt-xml --quiet'
 VIRTBUILDER='/usr/bin/virt-builder'
-PACKER='/usr/bin/packer'
 #bind -x '"\C-r": "source $0"' &> /dev/null
 
 
 usage() {
-  cat << EOF
-[h|help]
-  this help
+  local -A usages=(
+    [h | help]='this help'
+    [q | quit | exit]='quit'
+    [v]='verbose on. enter to disable'
+    [u | U]='system | session'
+    [l | ls | list]="on | off\n  lists domains/pools/blocks based on where you are"
+    [ld]='list domains'
+    [lp]='list pools'
+    [ln]='list networks'
+    [lb]='list blocks'
+    [lf]='list interfaces'
+    [use | cd]="doing/do_name | domain\n  doing: domain/pool to work on it"
+    [i | info]='info'
+    [init]='initialize'
+    [set]="edit/add options\n  key val1 val2"
+    [unset]='disk | iso val  remove'
+    [up | on | start]='start a pool or network or a domain'
+    [down | off | stop]='stop a pool or network or a domain'
+    [term]='terminate'
+    [touch]="make volume\n  touch NAME size=[G|M] format=[raw|qcow2]\n  default: size=10G format=raw"
+    [rm]='remove volume'
+    [cut]="slice disk\n  path must come first\n  cut /PATH/TO/VOLUME loop=\n  default: loop=/dev/loop0"
+    [fill]="fill empty cutted disk\n  fill /PATH/TO/VOLUME loop= target= hostname=\n  default: loop=/dev/loop0 target=${EVD}/target hostname=ev"
+    [:FUNC]='exec one of the underlying functions directly. empty to list them'
+    [/VIRSH_CMD]='exec virsh commands directly. empty to enter virsh shell'
+    [!COMMAND]='exec shell commands directly. empty to enter bash shell'
+  )
 
-[q|quit|exit]
-  quit
-
-[v]
-  verbose on. (enter to disable)
-
-[u|U]
-  system|session
-
-[list|ls|l] on|off
-  lists domains/pools/blocks based on where you are
-
-[ld]
-  list domains
-
-[lp]
-  list pools
-
-[ln]
-  list networks
-
-[lb]
-  list blocks
-
-[lf]
-  list interfaces
-
-[use|cd] doing/do_name|domain
-  doing: domain/pool
-  to work on it
-
-[i|info]
-  info
-
-[init]
-  initialize
-
-[set] key val1 val2
-  edit/add options
-
-[unset] disk|iso val
-  remove
-
-[up]
-  start a pool or network or a domain
-
-[down]
-  stop a pool or network or a domain
-
-[term]
-  terminate
-
-[mkv]
-  make volume
-
-[rmv]
-  remove volume
-
-[:FUNC]
-  exec one of the underlying functions directly. empty to list them
-
-[/VIRSH_CMD]
-  exec virsh commands directly. empty to enter virsh shell
-
-[!COMMAND]
-  exec shell commands directly. empty to enter bash shell
-
-EOF
+  [[ -z "${1}" ]] && for k in "${!usages[@]}"; do
+    echo -e "[$k]\n  ${usages[$k]}\n"
+  done || echo -e "[$1]\n  ${usages[$1]}\n"
 }
 
 
@@ -112,6 +70,8 @@ use_what() {
     *)
       a="${1%/*}"
       z="${1#*/}"
+      [[ "${a}" = "n" ]] && a='network'
+      [[ "${a}" = "p" ]] && a='pool'
       [[ ${a} = ${z} ]] && z=''
       keep_doing="${doing}"
       keep_do_name="${do_name}"
@@ -123,12 +83,10 @@ use_what() {
       fi
 
       # check malformed path
-      if [[ "${doing}" = 'domain' ]] || \
-         [[ "${doing}" = 'pool' ]] || \
-         [[ "${doing}" = 'network' ]] || \
-         [[ "${doing}" = '' ]]; then
-        true
-      else
+      if [[ "${doing}" != 'domain' ]] && \
+         [[ "${doing}" != 'pool' ]] && \
+         [[ "${doing}" != 'network' ]] && \
+         [[ "${doing}" != '' ]]; then
         echo 'malformed' && doing="${keep_doing}" && do_name="${keep_do_name}"
       fi
       ;;
@@ -169,8 +127,9 @@ info_host() {
   virsh: $(which virsh)
   virt-xml: $(which virt-xml)
   virt-builder: $(which virt-builder)
-  packer: $(which packer)
   virt-resize: $(which virt-resize)
+  debootstrap: $(which debootstrap)
+  parted: $(which parted)
 
 EOF
 }
@@ -333,26 +292,6 @@ list_domain_stuff() {
 }
 
 
-mkv() {
-  [[ -z "${1}" ]] || [[ -z "${2}" ]] && \
-  echo 'mkv NAME SIZE(M|G)' && return
-  ${VIRSH} -c ${URI} \
-    vol-create-as --pool "${do_name}" \
-                  --name "${1}" \
-                  --capacity "${2}" \
-                  --format qcow2
-}
-
-
-rmv() {
-  [[ -z "${1}" ]] && echo 'rmv NAME' && return
-  echo "removing volume: ${1}"
-  read -p 'are you sure? (say YES) '
-  [[ "${REPLY}" = 'YES' ]] && \
-  ${VIRSH} -c ${URI} vol-delete --pool "${do_name}" --vol "${1}"
-}
-
-
 init_what() {
   case "${doing}" in
     'pool')
@@ -380,18 +319,6 @@ init_pool() {
 }
 
 
-init_domain() {
-  temp_define_xml="$(mktemp)"
-  ${VIRTINST} --print-xml --connect $URI --import --virt-type kvm --cpu host \
-              --graphics vnc --memory 128 --name "${do_name}" --network none \
-              --disk "${1}" > "${temp_define_xml}" && \
-  ${VIRSH} -c ${URI} define --file "${temp_define_xml}" && \
-  ${VXML} -c ${URI} ${do_name} --remove-device --input tablet && \
-  rm -f "${temp_define_xml}" && \
-  echo -e "Domain ${do_name} initiated\n"
-}
-
-
 init_network() {
   [[ "${doing}" != 'network' ]] && return
   [[ -z "${1}" ]] && echo 'no bridge name specified' && return
@@ -406,8 +333,20 @@ init_network() {
 }
 
 
+init_domain() {
+  temp_define_xml="$(mktemp)"
+  ${VIRTINST} --print-xml --connect $URI --import --virt-type kvm --cpu host \
+              --graphics vnc --memory 128 --name "${do_name}" --network none \
+              --disk "${1}" > "${temp_define_xml}" && \
+  ${VIRSH} -c ${URI} define --file "${temp_define_xml}" && \
+  ${VXML} -c ${URI} ${do_name} --remove-device --input tablet && \
+  rm -f "${temp_define_xml}" && \
+  echo -e "Domain ${do_name} initiated\n"
+}
+
+
 set_kv() {
-  [[ -z ${do_name} ]] && echo 'domain not specified' && return
+  [[ -z ${do_name} ]] && echo 'lots of things' && return
   key="${1}"
   val1="${2}"
   val2="${3}"
@@ -452,11 +391,20 @@ set_kv() {
       [[ ${val1} = 'disk' ]] && val1='hd'
       ${VXML} -c ${URI} ${do_name} --edit --boot ${val1}
       ;;
+    'path')
+      [[ $(is_pool) = 'false' ]] && echo 'only in pool' && return
+      ${VIRSH} -c ${URI} pool-edit --pool ${do_name} && down && up
+      ;;
     '')
-      echo "set [cpu | memory] min max"
-      echo "set [disk | iso] path"
-      echo "set nic [nat | bridge | ovs] [network_name | bridge_name | ovs bridge name]"
-      echo -e "set boot [hd | cdrom]\n"
+      if [[ "${doing}" = 'domain' ]]; then
+          echo "set [cpu | memory] min max"
+          echo "set [disk | iso] path"
+          echo "set nic [nat | bridge | ovs] [network_name | bridge_name | ovs bridge name]"
+          echo -e "set boot [hd | cdrom]\n"
+      fi
+      if [[ "${doing}" = 'pool' ]]; then
+          echo -e "set path address\n"
+      fi
       ;;
     *)
       echo -e "invalid key value: ${key} ${val}\n"
@@ -473,11 +421,106 @@ unset_kv() {
       ${VXML} -c ${URI} ${do_name} --remove-device --disk "${val}"
       ;;
     'nic')
-      ${VXML} -c ${URI} ${do_name} --remove-device --network mac="${val}"
+      ${VXML} -c ${URI} ${do_name} --remove-device --network mac="52:54:00:${val}"
       ;;
     '*')
       echo -e "invalid key value: ${key} ${val}\n"
   esac
+}
+
+
+touch_volume() {
+  if [[ -z "${1}" ]] || [[ "${1}" =~ '=' ]]; then
+    usage 'touch'
+    return
+  fi
+  touch_volume_name=${1}
+  touch_volume_size='10G'
+  touch_volume_format='raw'
+  get_keyvals "${@}"
+  ${VIRSH} -c ${URI} vol-create-as \
+                       --pool "${do_name}" \
+                       --name $touch_volume_name.$touch_volume_format \
+                       --capacity $touch_volume_size \
+                       --format $touch_volume_format
+}
+
+
+rm_volume() {
+  [[ -z "${1}" ]] && echo 'rm NAME' && return
+  echo "removing volume: ${1}"
+  read -p 'are you sure? (say YES) '
+  [[ "${REPLY}" = 'YES' ]] && \
+  ${VIRSH} -c ${URI} vol-delete --pool "${do_name}" --vol "${1}"
+}
+
+
+cut_disk() {
+  if [[ -z "${1}" ]] || [[ "${1}" =~ '=' ]]; then
+    usage 'cut'
+    return
+  fi
+  local cut_disk_loop='/dev/loop0'
+  local parted='parted --script'
+  get_keyvals "${@}"
+  losetup ${cut_disk_loop} "${1}" || return
+  losetup
+  read -p 'continue? (say YES) '
+  if [[ $REPLY != 'YES' ]]; then
+    losetup -d ${cut_disk_loop}
+    return
+  fi
+
+  ${parted} ${cut_disk_loop} mklabel gpt
+  ${parted} ${cut_disk_loop} mkpart grub 0% 2m
+  ${parted} ${cut_disk_loop} set 1 bios on
+  ${parted} ${cut_disk_loop} mkpart os ext4 2m 100%
+  partprobe
+  mkfs.ext4 -q ${cut_disk_loop}p2
+  losetup -d ${cut_disk_loop}
+}
+
+
+fill_volume() {
+  if [[ -z "${1}" ]] || [[ "${1}" =~ '=' ]]; then
+    usage 'fill'
+    return
+  fi
+  local fill_volume_file="${1}"
+  local fill_volume_loop='/dev/loop0'
+  local fill_volume_target="${EVD}/target"
+  local fill_volume_hostname='ev'
+  get_keyvals "${@}"
+
+  provision="
+    locale-gen;
+    echo ${fill_volume_hostname} >/etc/hostname;
+    passwd;
+    DEBIAN_FRONTEND=noninteractive \
+    apt-get -qq --no-install-recommends install grub-pc >/dev/null&&
+    grub-install --target=i386-pc --boot-directory=/boot/ ${loop}&&
+    sed -i '/GRUB_TIMEOUT/s/5/0/g' /etc/default/grub&&
+    sed -i 's/quiet/console=ttyS0/g' /etc/default/grub&&
+    update-grub
+  "
+
+  mountp="$(mktemp -d)" || return
+  losetup ${fill_volume_loop} ${fill_volume_file} || return
+  mount ${fill_volume_loop}p2 ${mountp} && echo 'mount done' || return
+  cp -a "${fill_volume_target}"/* "${mountp}"/ && echo 'copy done'
+  for i in {dev,proc,sys}; do mount --bind /${i} "${mountp}"/$i; done
+  ln -s /proc/mounts "${mountp}"/etc/mtab
+
+  local uuid=$(blkid -o value -s UUID ${fill_volume_loop}p2)
+  echo -e "UUID=${uuid} /\text4 errors=remount-ro\t0 1" >"${mountp}"/etc/fstab
+  sed -i '/# en_US.UTF-8/s/^#//g' "${mountp}"/etc/locale.gen
+  echo 'LANG="en_US.UTF-8"' >"${mountp}"/etc/default/locale
+  echo "${provision}" >"${mountp}"/prov
+  chroot "${mountp}" /bin/sh -c 'chmod +x /prov && /prov && rm -f /prov'
+
+  sync
+  for i in {dev,proc,sys}; do umount "${mountp}"/$i; done
+  umount ${mountp} && rmdir ${mountp} && losetup -d ${fill_volume_loop} && echo 'all clean'
 }
 
 
@@ -565,18 +608,15 @@ term_domain() {
 }
 
 
-build_packer() {
-  packer_output="${2}"
-  [[ ${doing} = 'pool' ]] && \
-  packer_output="$(${VIRSH} -c ${URI} pool-dumpxml ${do_name} | \
-                 awk -F'[><]' '/path/ {print $3}')"
-  [[ -z "${packer_files}" ]] && \
-  echo 'set packer-files PATH' && return
-  [[ -z "${packer_output}" ]] && \
-  echo 'build_packer OUTPUT' && return
-  cd "${packer_output}" && cp -r ${packer_files}/* . && \
-  cd "${packer_input##*/}" && vim vars.json && \
-  packer build -var-file=vars.json -var output=. debian.json
+is_pool() {
+  [[ ${doing} = 'pool' ]] && echo 'true' || echo 'false'
+}
+
+
+get_keyvals() {
+  for keyval in "${@}"; do
+    [[ "${keyval}" =~ '=' ]] && export "${FUNCNAME[1]}_${keyval}"
+  done
 }
 
 
@@ -595,7 +635,7 @@ main() {
 
   ps="ev/${URI#qemu:///}/${doing}/${do_name}/"
   while IFS="" read -r -e -p $"$ps > "; do
-    history -n /tmp/.ev_history
+    #history -n /tmp/.ev_history
     history -s "${REPLY}" 2>&1
     input=($REPLY)
 
@@ -636,11 +676,11 @@ main() {
       'lf')
         list_domain_interfaces
         ;;
-      'mkv'|'mkvolume')
-        mkv "${input[1]}" "${input[2]}"
+      'touch')
+        touch_volume "${input[1]}" "${input[2]}" "${input[3]}"
         ;;
-      'rmv'|'rmvolume')
-        rmv "${input[1]}"
+      'rm')
+        rm_volume "${input[1]}"
         ;;
       'init')
         init_what "${input[1]}"
@@ -651,14 +691,20 @@ main() {
       'unset')
         unset_kv "${input[1]}" "${input[2]}"
         ;;
-      'up')
+      'up'|'on'|'start')
         up
         ;;
-      'down')
+      'down'|'off'|'stop')
         down
         ;;
       'term')
         term_what "${input[1]}"
+        ;;
+      'fill')
+        fill_volume "${input[1]}" "${input[2]}" "${input[3]}" "${input[4]}"
+        ;;
+      'cut')
+        cut_disk "${input[1]}" "${input[2]}"
         ;;
       :*)
         [[ -z "${input[@]#:}" ]] && declare -F | awk '{print $3}' || \
@@ -689,8 +735,8 @@ main() {
 
 
 # extras
-ev_up() {
-  pkgs=(
+evup() {
+  local pkgs=(
     atop htop git screen dnsmasq packer parted qemu-utils qemu-kvm
     libguestfs-tools libvirt-clients libvirt-daemon-system
   )
@@ -719,6 +765,54 @@ EOL
   #sudo echo "allow br0" >>/etc/qemu/bridge.conf && \
   #sudo ip address flush br0 scope global && \
   #sudo setcap 'cap_ne_admin+ep' /usr/lib/qemu/qemu-bridge-helper
+}
+
+
+doos() {
+  release='buster'
+  target="${EVD}/target"
+  mirror='http://debian.asis.ai/debian/'
+  local packages=(openssh-server linux-image-amd64 htop less vim screen git grc
+                  xtail less vim mtr-tiny locales
+  )
+
+  for i in ${packages[@]}; do pkgs+="$i,"; done
+  debootstrap --arch=amd64 --include="$pkgs"sudo \
+              --components main,contrib,non-free \
+              ${release} "${target}" "${mirror}"
+}
+
+
+convert() {
+  qemu-img convert -f raw -O qcow2 ${1} ${2}
+  #pool-refresh
+}
+
+
+getin() {
+  loop="/dev/loop0"
+
+  open() {
+    losetup ${loop} ${1} || return
+    mountp="$(mktemp -d -p .)" || return
+    mount ${loop}p2 "${mountp}"
+    for i in {dev,proc,sys}; do mount --bind /${i} "${mountp}/${i}"; done
+  }
+
+
+  close() {
+    for i in {dev,proc,sys}; do umount "${1}/${i}"; done
+    umount "${1}"
+    rmdir "${1}"
+    losetup -d ${loop}
+  }
+
+
+  case ${1} in
+    open) open "$2";;
+    close) close "$2";;
+    *|'') echo 'open | close'
+  esac
 }
 
 
